@@ -1,7 +1,7 @@
 package main
 
 import (
-	"go-crawler/storage"
+	"github.com/AzimVafadari/basic-crawler-yazd-uni/internal/basic-crawler-yazd-uni/storage"
 	"log"
 )
 
