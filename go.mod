@@ -1,4 +1,4 @@
-module go-crawler
+module github.com/AzimVafadari/basic-crawler-yazd-uni
 
 go 1.25
 
