@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/AzimVafadari/basic-crawler-yazd-uni/internal/basic-crawler-yazd-uni/storage"
@@ -25,7 +26,7 @@ func NewFetcher(repo *storage.Repository) *Fetcher {
 // Returns the HTML content if successful, or an error otherwise.
 func (f *Fetcher) Fetch(url string) (string, error) {
 	client := &http.Client{
-		Timeout: 15 * time.Second, // Avoid hanging requests
+		Timeout: 60 * time.Second, // Avoid hanging requests
 	}
 
 	log.Printf("Fetching: %s ...", url)
@@ -43,12 +44,26 @@ func (f *Fetcher) Fetch(url string) (string, error) {
 
 	htmlContent := string(body)
 
+	// --- START: MODIFIED LOGIC ---
 	// Save to the database
 	if err := f.repo.SavePage(url, htmlContent, resp.StatusCode); err != nil {
-		return "", fmt.Errorf("failed to save page %s: %w", url, err)
+		// Check if this is the "UNIQUE" error.
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			// This is not a real error. It just means we've already
+			// saved this page. We can safely ignore it and proceed.
+			log.Printf("Already in DB: %s", url)
+		} else {
+			// This is a *real* error (e.g., database file locked)
+			// In this case, we MUST return the error.
+			return "", fmt.Errorf("failed to save page %s: %w", url, err)
+		}
+	} else {
+		// This is a new page, log the success.
+		log.Printf("Saved new page: %s (status %d)", url, resp.StatusCode)
 	}
+	// --- END: MODIFIED LOGIC ---
 
-	log.Printf("Saved page: %s (status %d)", url, resp.StatusCode)
-
+	// In all cases (new page or duplicate page), we return the
+	// HTML content so the crawler can parse it for new links.
 	return htmlContent, nil
 }

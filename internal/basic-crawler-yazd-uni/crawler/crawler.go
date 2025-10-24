@@ -2,6 +2,7 @@ package crawler
 
 import (
 	"fmt"
+
 	"github.com/AzimVafadari/basic-crawler-yazd-uni/internal/basic-crawler-yazd-uni/fetcher"
 	"github.com/AzimVafadari/basic-crawler-yazd-uni/internal/basic-crawler-yazd-uni/parser"
 	"github.com/AzimVafadari/basic-crawler-yazd-uni/internal/basic-crawler-yazd-uni/uniqueness"
@@ -54,57 +55,58 @@ func (c *Crawler) Run() {
 
 	pagesCrawled := 0
 
-	// The main loop:
-	// 1. Check if the queue is empty.
-	// 2. Check if we have hit our page limit.
 	for len(c.queue) > 0 && pagesCrawled < c.pageLimit {
 
 		// --- 1. DEQUEUE ---
-		// Get the next URL from the front of the queue
 		currentURL := c.queue[0]
-		c.queue = c.queue[1:] // This moves the queue forward
+		c.queue = c.queue[1:]
 
-		// --- 2. CHECK UNIQUENESS ---
-		// Use your uniqueness.Checker to see if this URL is new
-		if !c.checker.IsUnique(currentURL) {
-			log.Printf("Skipping already seen URL: %s", currentURL)
-			continue // Go to the next iteration of the loop
-		}
+		// --- 2. REMOVE THE UNIQUENESS CHECK ---
+		// The fetcher now handles duplicates, so we
+		// no longer need to check here.
+		/*
+			if !c.checker.IsUnique(currentURL) {
+				log.Printf("Skipping already seen URL: %s", currentURL)
+				continue
+			}
+		*/
 
 		// --- 3. FETCH ---
-		// Use your fetcher.Fetch method
+		// The fetcher will now return HTML even for duplicates,
+		// and won't return a "UNIQUE" error.
 		htmlContent, err := c.fetcher.Fetch(currentURL)
 		if err != nil {
+			// This will only be for *real* errors now.
 			log.Printf("ERROR: Could not fetch %s: %v", currentURL, err)
-			continue // Go to the next iteration
+			continue
 		}
-		pagesCrawled++ // We successfully fetched a page
+		pagesCrawled++ // We successfully fetched and processed a page
 
 		// --- 4. PARSE ---
-		// Use your parser.ParseLinks function
 		links, err := parser.ParseLinks(currentURL, htmlContent)
 		if err != nil {
 			log.Printf("ERROR: Could not parse links on %s: %v", currentURL, err)
-			continue // Go to the next iteration
+			continue
 		}
+		log.Printf("Found %d new links on %s", len(links), currentURL)
 
 		// --- 5. PROCESS & ENQUEUE NEW LINKS ---
 		for _, linkStr := range links {
-			// Parse the new link string into a url.URL struct
 			linkURL, err := url.Parse(linkStr)
 			if err != nil {
 				log.Printf("WARN: Found invalid link '%s': %v", linkStr, err)
 				continue
 			}
 
-			// Clean the link (remove #fragments)
-			linkURL.Fragment = ""
+			linkURL.Fragment = "" // Clean the link
 			cleanLinkStr := linkURL.String()
 
-			// Use your NEW urlhelper.IsOnDomain function
-			if urlhelper.IsOnDomain(c.targetDomain, linkURL) {
-				// If it's on our domain, add it to the queue
-				// The checker will handle duplicates next time it's dequeued
+			// --- THIS IS THE NEW HOME FOR THE UNIQUENESS CHECK ---
+			// We only add new links to the queue *if* they are:
+			// 1. On our target domain
+			// 2. Not already seen by our checker
+			if urlhelper.IsOnDomain(c.targetDomain, linkURL) && c.checker.IsUnique(cleanLinkStr) {
+				// It's a new, valid link. Add it to the queue!
 				c.queue = append(c.queue, cleanLinkStr)
 			}
 		}

@@ -71,3 +71,22 @@ func (r *Repository) SavePage(url string, htmlContent string, statusCode int) er
 
 	return nil
 }
+
+// GetAllURLs retrieves a list of all URLs currently in the database.
+func (r *Repository) GetAllURLs() ([]string, error) {
+	rows, err := r.db.Query("SELECT url FROM pages")
+	if err != nil {
+		return nil, fmt.Errorf("could not query for URLs: %w", err)
+	}
+	defer rows.Close()
+
+	var urls []string
+	for rows.Next() {
+		var url string
+		if err := rows.Scan(&url); err != nil {
+			return nil, fmt.Errorf("could not scan URL row: %w", err)
+		}
+		urls = append(urls, url)
+	}
+	return urls, nil
+}

@@ -67,3 +67,14 @@ func (c *Checker) Reset() {
 	defer c.mu.Unlock()
 	c.seen = make(map[string]struct{})
 }
+
+// Preload populates the checker with a list of already-seen URLs.
+// This is used to hydrate the checker from the database on startup.
+func (c *Checker) Preload(urls []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, url := range urls {
+		c.seen[url] = struct{}{} // Add each URL to the 'seen' map
+	}
+}
