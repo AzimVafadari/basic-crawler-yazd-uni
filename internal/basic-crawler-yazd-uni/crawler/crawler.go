@@ -64,6 +64,10 @@ func (c *Crawler) Run() {
 	var wg sync.WaitGroup
 	var pagesCrawled int32
 
+	// --- Rate Limiter (global delay: one request every 2 seconds) ---
+	rateLimiter := time.NewTicker(2 * time.Second)
+	defer rateLimiter.Stop()
+
 	// --- Worker goroutine ---
 	worker := func(id int) {
 		defer wg.Done()
@@ -72,6 +76,13 @@ func (c *Crawler) Run() {
 			if atomic.LoadInt32(&pagesCrawled) >= int32(c.pageLimit) {
 				return
 			}
+
+			// --- Wait for permission to send next request ---
+			// Global delay (shared among all workers)
+			<-rateLimiter.C
+
+			// (Alternative: delay per worker)
+			// time.Sleep(2 * time.Second)
 
 			htmlContent, err := c.fetcher.Fetch(currentURL)
 			if err != nil {
@@ -84,7 +95,7 @@ func (c *Crawler) Run() {
 			atomic.AddInt64(&c.bytesFetched, int64(len(htmlContent)))
 
 			count := atomic.AddInt32(&pagesCrawled, 1)
-			log.Printf("[Worker %d] Crawled (%d/%d): %s", id, count, c.pageLimit, currentURL)
+			log.Printf("[Worker %d] 🕸 Crawled (%d/%d): %s", id, count, c.pageLimit, currentURL)
 
 			// Parse links
 			links, err := parser.ParseLinks(currentURL, htmlContent)
@@ -126,6 +137,7 @@ func (c *Crawler) Run() {
 			c.mu.Lock()
 			if len(c.queue) == 0 {
 				c.mu.Unlock()
+				time.Sleep(500 * time.Millisecond) // prevent busy waiting
 				continue
 			}
 			currentURL := c.queue[0]
@@ -136,7 +148,8 @@ func (c *Crawler) Run() {
 			case urlChan <- currentURL:
 				// sent successfully
 			default:
-				// channel full → back off slightly
+				// channel full → small backoff
+				time.Sleep(200 * time.Millisecond)
 			}
 		}
 	}
@@ -173,6 +186,5 @@ func (c *Crawler) Run() {
 	log.Printf("🔗 Links discovered (including duplicates): %d", c.discovered)
 	log.Printf("🧾 Queue length at finish: %d", queueLength)
 	log.Printf("✅ Unique URLs stored: %d", c.checker.Count())
-
 	log.Printf("Crawling finished. Crawled %d pages.", pagesCrawled)
 }
