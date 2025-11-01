@@ -19,8 +19,7 @@ func main() {
 	log.Println("--- Crawler Starting ---")
 	log.Printf("Target: %s, Limit: %d pages", START_URL, PAGE_LIMIT)
 
-	// --- 1. Initialize Dependencies (The "Tools") ---
-
+	// --- 1. Initialize Dependencies ---
 	repo, err := storage.NewRepository(DB_FILENAME)
 	if err != nil {
 		log.Fatalf("FATAL: Could not initialize storage: %v", err)
@@ -30,8 +29,7 @@ func main() {
 	f := fetcher.NewFetcher(repo)
 	c := uniqueness.NewChecker()
 
-	// --- 2. HYDRATE STATE (The Fix!) ---
-	// Load all URLs from the database into the checker's memory.
+	// --- 2. Hydrate State ---
 	log.Println("Hydrating uniqueness checker from database...")
 	existingURLs, err := repo.GetAllURLs()
 	if err != nil {

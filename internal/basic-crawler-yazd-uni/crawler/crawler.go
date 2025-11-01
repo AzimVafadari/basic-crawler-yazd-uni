@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/AzimVafadari/basic-crawler-yazd-uni/internal/basic-crawler-yazd-uni/fetcher"
 	"github.com/AzimVafadari/basic-crawler-yazd-uni/internal/basic-crawler-yazd-uni/parser"
@@ -13,7 +14,7 @@ import (
 	"github.com/AzimVafadari/basic-crawler-yazd-uni/internal/basic-crawler-yazd-uni/urlhelper"
 )
 
-// Crawler struct that manages the process
+// Crawler manages the crawling process and statistics.
 type Crawler struct {
 	// Tools (Dependencies)
 	fetcher *fetcher.Fetcher
@@ -26,10 +27,16 @@ type Crawler struct {
 
 	// State
 	queue []string
-	mu     sync.Mutex // protects queue
+	mu    sync.Mutex // protects queue
+
+	// --- Statistics ---
+	startTime    time.Time
+	bytesFetched int64
+	errorCount   int64
+	discovered   int64
 }
 
-// NewCrawler creates and initialize a new crawler.
+// NewCrawler creates and initializes a new crawler instance.
 func NewCrawler(startURLStr string, f *fetcher.Fetcher, c *uniqueness.Checker, limit int) (*Crawler, error) {
 	u, err := url.Parse(startURLStr)
 	if err != nil {
@@ -48,15 +55,16 @@ func NewCrawler(startURLStr string, f *fetcher.Fetcher, c *uniqueness.Checker, l
 	}, nil
 }
 
-// Run starts the main crawling loop with concurrency and queue.
+// Run starts the main crawling loop with concurrency and collects statistics.
 func (c *Crawler) Run() {
+	c.startTime = time.Now()
 	log.Printf("Starting crawl. Target domain: %s, Page limit: %d", c.targetDomain, c.pageLimit)
 
 	urlChan := make(chan string, 200)
 	var wg sync.WaitGroup
 	var pagesCrawled int32
 
-	// --- Worker goroutine function ---
+	// --- Worker goroutine ---
 	worker := func(id int) {
 		defer wg.Done()
 		for currentURL := range urlChan {
@@ -68,8 +76,12 @@ func (c *Crawler) Run() {
 			htmlContent, err := c.fetcher.Fetch(currentURL)
 			if err != nil {
 				log.Printf("[Worker %d] ERROR: Could not fetch %s: %v", id, currentURL, err)
+				atomic.AddInt64(&c.errorCount, 1)
 				continue
 			}
+
+			// Count fetched bytes
+			atomic.AddInt64(&c.bytesFetched, int64(len(htmlContent)))
 
 			count := atomic.AddInt32(&pagesCrawled, 1)
 			log.Printf("[Worker %d] Crawled (%d/%d): %s", id, count, c.pageLimit, currentURL)
@@ -78,10 +90,14 @@ func (c *Crawler) Run() {
 			links, err := parser.ParseLinks(currentURL, htmlContent)
 			if err != nil {
 				log.Printf("[Worker %d] ERROR parsing %s: %v", id, currentURL, err)
+				atomic.AddInt64(&c.errorCount, 1)
 				continue
 			}
 
-			// Add discovered links to the queue
+			// Count discovered links (including duplicates)
+			atomic.AddInt64(&c.discovered, int64(len(links)))
+
+			// Add discovered links to queue
 			for _, linkStr := range links {
 				linkURL, err := url.Parse(linkStr)
 				if err != nil {
@@ -100,10 +116,8 @@ func (c *Crawler) Run() {
 	}
 
 	// --- Dispatcher goroutine ---
-	// Feeds URLs from the queue into the channel as workers process them.
 	dispatcher := func() {
 		for {
-			// Stop when limit reached
 			if atomic.LoadInt32(&pagesCrawled) >= int32(c.pageLimit) {
 				close(urlChan)
 				return
@@ -114,32 +128,30 @@ func (c *Crawler) Run() {
 				c.mu.Unlock()
 				continue
 			}
-			// Dequeue next URL
 			currentURL := c.queue[0]
 			c.queue = c.queue[1:]
 			c.mu.Unlock()
 
 			select {
 			case urlChan <- currentURL:
-				// Sent successfully
+				// sent successfully
 			default:
-				// Channel full → back off slightly
+				// channel full → back off slightly
 			}
 		}
 	}
 
-	// --- Start the dispatcher ---
+	// Start dispatcher
 	go dispatcher()
 
-	// --- Start workers ---
+	// Start workers
 	workerCount := 3
 	wg.Add(workerCount)
 	for i := 1; i <= workerCount; i++ {
 		go worker(i)
 	}
 
-	// --- Seed the queue with the start URL ---
-	// (already done in constructor, but ensures first dispatch happens)
+	// Ensure queue has seed URL
 	c.mu.Lock()
 	if len(c.queue) == 0 {
 		c.queue = append(c.queue, c.startURL.String())
@@ -147,5 +159,20 @@ func (c *Crawler) Run() {
 	c.mu.Unlock()
 
 	wg.Wait()
-	log.Printf("Crawling finished. Crawled %d pages. Total unique URLs found: %d", pagesCrawled, c.checker.Count())
+
+	// --- Print statistics ---
+	duration := time.Since(c.startTime)
+	c.mu.Lock()
+	queueLength := len(c.queue)
+	c.mu.Unlock()
+
+	log.Println("=== Crawl Statistics ===")
+	log.Printf("⏱  Duration: %v", duration)
+	log.Printf("📦 Total bytes fetched: %d bytes", c.bytesFetched)
+	log.Printf("❌ Errors encountered: %d", c.errorCount)
+	log.Printf("🔗 Links discovered (including duplicates): %d", c.discovered)
+	log.Printf("🧾 Queue length at finish: %d", queueLength)
+	log.Printf("✅ Unique URLs stored: %d", c.checker.Count())
+
+	log.Printf("Crawling finished. Crawled %d pages.", pagesCrawled)
 }
