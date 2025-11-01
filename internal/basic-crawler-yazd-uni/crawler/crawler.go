@@ -2,14 +2,15 @@ package crawler
 
 import (
 	"fmt"
+	"log"
+	"net/url"
+	"sync"
+	"sync/atomic"
 
 	"github.com/AzimVafadari/basic-crawler-yazd-uni/internal/basic-crawler-yazd-uni/fetcher"
 	"github.com/AzimVafadari/basic-crawler-yazd-uni/internal/basic-crawler-yazd-uni/parser"
 	"github.com/AzimVafadari/basic-crawler-yazd-uni/internal/basic-crawler-yazd-uni/uniqueness"
 	"github.com/AzimVafadari/basic-crawler-yazd-uni/internal/basic-crawler-yazd-uni/urlhelper"
-
-	"log"
-	"net/url"
 )
 
 // Crawler struct that manages the process
@@ -23,22 +24,20 @@ type Crawler struct {
 	targetDomain string
 	pageLimit    int
 
-	// State (WM)
+	// State
 	queue []string
+	mu     sync.Mutex // protects queue
 }
 
 // NewCrawler creates and initialize a new crawler.
 func NewCrawler(startURLStr string, f *fetcher.Fetcher, c *uniqueness.Checker, limit int) (*Crawler, error) {
-	// Parse the starting URL string to url.URL struct
 	u, err := url.Parse(startURLStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid start URL: %w", err)
 	}
 
-	// The target domain
 	domain := u.Hostname()
 
-	// Initialize the crawler
 	return &Crawler{
 		fetcher:      f,
 		checker:      c,
@@ -49,68 +48,104 @@ func NewCrawler(startURLStr string, f *fetcher.Fetcher, c *uniqueness.Checker, l
 	}, nil
 }
 
-// Run starts the main crawling loop.
+// Run starts the main crawling loop with concurrency and queue.
 func (c *Crawler) Run() {
 	log.Printf("Starting crawl. Target domain: %s, Page limit: %d", c.targetDomain, c.pageLimit)
 
-	pagesCrawled := 0
+	urlChan := make(chan string, 200)
+	var wg sync.WaitGroup
+	var pagesCrawled int32
 
-	for len(c.queue) > 0 && pagesCrawled < c.pageLimit {
-
-		// --- 1. DEQUEUE ---
-		currentURL := c.queue[0]
-		c.queue = c.queue[1:]
-
-		// --- 2. REMOVE THE UNIQUENESS CHECK ---
-		// The fetcher now handles duplicates, so we
-		// no longer need to check here.
-		/*
-			if !c.checker.IsUnique(currentURL) {
-				log.Printf("Skipping already seen URL: %s", currentURL)
-				continue
+	// --- Worker goroutine function ---
+	worker := func(id int) {
+		defer wg.Done()
+		for currentURL := range urlChan {
+			// Stop condition
+			if atomic.LoadInt32(&pagesCrawled) >= int32(c.pageLimit) {
+				return
 			}
-		*/
 
-		// --- 3. FETCH ---
-		// The fetcher will now return HTML even for duplicates,
-		// and won't return a "UNIQUE" error.
-		htmlContent, err := c.fetcher.Fetch(currentURL)
-		if err != nil {
-			// This will only be for *real* errors now.
-			log.Printf("ERROR: Could not fetch %s: %v", currentURL, err)
-			continue
-		}
-		pagesCrawled++ // We successfully fetched and processed a page
-
-		// --- 4. PARSE ---
-		links, err := parser.ParseLinks(currentURL, htmlContent)
-		if err != nil {
-			log.Printf("ERROR: Could not parse links on %s: %v", currentURL, err)
-			continue
-		}
-		log.Printf("Found %d new links on %s", len(links), currentURL)
-
-		// --- 5. PROCESS & ENQUEUE NEW LINKS ---
-		for _, linkStr := range links {
-			linkURL, err := url.Parse(linkStr)
+			htmlContent, err := c.fetcher.Fetch(currentURL)
 			if err != nil {
-				log.Printf("WARN: Found invalid link '%s': %v", linkStr, err)
+				log.Printf("[Worker %d] ERROR: Could not fetch %s: %v", id, currentURL, err)
 				continue
 			}
 
-			linkURL.Fragment = "" // Clean the link
-			cleanLinkStr := linkURL.String()
+			count := atomic.AddInt32(&pagesCrawled, 1)
+			log.Printf("[Worker %d] Crawled (%d/%d): %s", id, count, c.pageLimit, currentURL)
 
-			// --- THIS IS THE NEW HOME FOR THE UNIQUENESS CHECK ---
-			// We only add new links to the queue *if* they are:
-			// 1. On our target domain
-			// 2. Not already seen by our checker
-			if urlhelper.IsOnDomain(c.targetDomain, linkURL) && c.checker.IsUnique(cleanLinkStr) {
-				// It's a new, valid link. Add it to the queue!
-				c.queue = append(c.queue, cleanLinkStr)
+			// Parse links
+			links, err := parser.ParseLinks(currentURL, htmlContent)
+			if err != nil {
+				log.Printf("[Worker %d] ERROR parsing %s: %v", id, currentURL, err)
+				continue
+			}
+
+			// Add discovered links to the queue
+			for _, linkStr := range links {
+				linkURL, err := url.Parse(linkStr)
+				if err != nil {
+					continue
+				}
+				linkURL.Fragment = ""
+				cleanLinkStr := linkURL.String()
+
+				if urlhelper.IsOnDomain(c.targetDomain, linkURL) && c.checker.IsUnique(cleanLinkStr) {
+					c.mu.Lock()
+					c.queue = append(c.queue, cleanLinkStr)
+					c.mu.Unlock()
+				}
 			}
 		}
 	}
 
+	// --- Dispatcher goroutine ---
+	// Feeds URLs from the queue into the channel as workers process them.
+	dispatcher := func() {
+		for {
+			// Stop when limit reached
+			if atomic.LoadInt32(&pagesCrawled) >= int32(c.pageLimit) {
+				close(urlChan)
+				return
+			}
+
+			c.mu.Lock()
+			if len(c.queue) == 0 {
+				c.mu.Unlock()
+				continue
+			}
+			// Dequeue next URL
+			currentURL := c.queue[0]
+			c.queue = c.queue[1:]
+			c.mu.Unlock()
+
+			select {
+			case urlChan <- currentURL:
+				// Sent successfully
+			default:
+				// Channel full → back off slightly
+			}
+		}
+	}
+
+	// --- Start the dispatcher ---
+	go dispatcher()
+
+	// --- Start workers ---
+	workerCount := 3
+	wg.Add(workerCount)
+	for i := 1; i <= workerCount; i++ {
+		go worker(i)
+	}
+
+	// --- Seed the queue with the start URL ---
+	// (already done in constructor, but ensures first dispatch happens)
+	c.mu.Lock()
+	if len(c.queue) == 0 {
+		c.queue = append(c.queue, c.startURL.String())
+	}
+	c.mu.Unlock()
+
+	wg.Wait()
 	log.Printf("Crawling finished. Crawled %d pages. Total unique URLs found: %d", pagesCrawled, c.checker.Count())
 }
